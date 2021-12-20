@@ -25,11 +25,6 @@ while True:
     except timeout:
       print("Timed out")
       time.sleep(60)
-  
-  # Use HTML comments to trim page down
-
-  start = page_content.find(b"<!--maincontent-->")
-  end = page_content.find(b"<!-- Start of HTML Footer -->")
 
   # This is an explanation of what occurs next.
   # numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9]
@@ -38,8 +33,8 @@ while True:
   # numbers[:8]  -----> [1, 2, 3, 4, 5, 6, 7, 8]
   # numbers[5:8] -----> [6, 7, 8]
 
-  table_data = page_content[start:end]
-  table_data = BeautifulSoup(table_data)
+  page_data = BeautifulSoup(page_content)
+  table_data = page_data.find(id="ctl00_MainContent_GV_AE_ALL_P")
 
   # Parse the page
   for row in table_data.find_all("tr")[1:]:
