@@ -17,7 +17,7 @@ while True:
   # open the URL and retry if timeout
   while True:
     try:
-      page_content = urllib.request.urlopen('http://ias.ecc.caddo911.com/ActiveEvents.asp', timeout=8).read()
+      page_content = urllib.request.urlopen('http://ias.ecc.caddo911.com/All_ActiveEvents.aspx', timeout=8).read()
       break
     except urllib.error.URLError:
       print("URL Error")
