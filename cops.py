@@ -60,7 +60,8 @@ while True:
   conn = mysql.connector.connect(host=config.databasehost,
           user=config.databaseuser,
           passwd=config.databasepasswd,
-          db=config.databasename)
+          db=config.databasename,
+	  auth_plugin='mysql_native_password')
   cursor = conn.cursor()
   for event in events:
     agency_test = "agency_{agency}".format(agency=event['agency'][:3])
