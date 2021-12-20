@@ -42,7 +42,7 @@ while True:
 
     for cell in row.find_all("td"):
       if len(cell.contents) > 0:
-        row_data.append(cell.contents[0])
+        row_data.append(cell.text)
       else:
         row_data.append("")
 
