@@ -8,9 +8,11 @@ This script will parse the Caddo 911 site every 5 minutes and store the calls in
  - MySQL
  - [mysql-connector-python](https://pypi.python.org/pypi/mysql-connector-python/2.0.4)
  - [beautifulsoup4](https://pypi.org/project/beautifulsoup4/)
+ - [requests](https://pypi.org/project/requests/)
  - Python 3
 
 ## To Use:
  - pip install -r requirements
+ - Setup your MySQL database
  - Setup your database credentials in config.py
  - Run cops.py
