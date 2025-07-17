@@ -19,10 +19,9 @@ DB_CONFIG = {
 }
 
 URL = 'http://ias.ecc.caddo911.com/All_ActiveEvents.aspx'
-
 HEADERS = ["agency", "time", "units", "description", "street", "cross_streets", "municipal"]
-
-FETCH_INTERVAL_SECONDS = 180
+FETCH_INTERVAL_SECONDS = 35
+REPEAT_CALL_INTERVAL_SECONDS = 23 * 3600  # 23 hours
 
 
 def fetch_active_calls(url, retries=3, delay=60):
@@ -59,7 +58,8 @@ def parse_calls(page_content):
             continue
         event = dict(zip(HEADERS, row_data))
 
-        combined = ''.join([event[h] for h in HEADERS])
+        # Exclude 'units' from the hash
+        combined = ''.join([event[h] for h in HEADERS if h != "units"])
         event['hash'] = hashlib.md5(combined.encode('utf-8')).hexdigest()
 
         events.append(event)
@@ -88,9 +88,9 @@ def create_agency_table(cursor, table_name):
             Municipal VARCHAR(10) COLLATE utf8_bin,
             Date DATETIME DEFAULT NULL,
             Hash VARCHAR(64) COLLATE utf8_bin NOT NULL,
-            FirstSeen DATETIME DEFAULT CURRENT_TIMESTAMP,
-            LastSeen DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-            UNIQUE KEY unique_event (Hash),
+            FirstSeen DATETIME NOT NULL,
+            LastSeen DATETIME NOT NULL,
+            Resolved TINYINT(1) DEFAULT 0,
             KEY idx_agency (Agency) KEY_BLOCK_SIZE=1024,
             KEY idx_municipal (Municipal) KEY_BLOCK_SIZE=1024,
             FULLTEXT KEY idx_description (Description) KEY_BLOCK_SIZE=1024,
@@ -99,19 +99,59 @@ def create_agency_table(cursor, table_name):
     """)
 
 
-def upsert_event(cursor, table_name, event):
+def get_event_last_seen(cursor, table_name, event_hash):
+    cursor.execute(f"SELECT LastSeen FROM {table_name} WHERE Hash = %s ORDER BY LastSeen DESC LIMIT 1", (event_hash,))
+    row = cursor.fetchone()
+    return row[0] if row else None
+
+
+def get_event_units(cursor, table_name, event_hash):
+    cursor.execute(f"SELECT Units FROM {table_name} WHERE Hash = %s ORDER BY LastSeen DESC LIMIT 1", (event_hash,))
+    row = cursor.fetchone()
+    return row[0] if row else None
+
+
+def insert_event(cursor, table_name, event):
+    now_utc = datetime.datetime.utcnow()
     query = f"""
         INSERT INTO {table_name} 
-        (Agency, Time, Units, Description, Street, CrossStreets, Municipal, Date, Hash)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ON DUPLICATE KEY UPDATE LastSeen = CURRENT_TIMESTAMP
+        (Agency, Time, Units, Description, Street, CrossStreets, Municipal, Date, Hash, FirstSeen, LastSeen)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
     params = (
         event['agency'], event['time'], event['units'],
         event['description'], event['street'], event['cross_streets'],
-        event['municipal'], datetime.datetime.now(), event['hash']
+        event['municipal'], now_utc, event['hash'], now_utc, now_utc
     )
     cursor.execute(query, params)
+
+
+def update_last_seen(cursor, table_name, event_hash):
+    now_utc = datetime.datetime.utcnow()
+    cursor.execute(
+        f"UPDATE {table_name} SET LastSeen = %s WHERE Hash = %s",
+        (now_utc, event_hash)
+    )
+
+
+def update_units_and_last_seen(cursor, table_name, event_hash, new_units):
+    now_utc = datetime.datetime.utcnow()
+    cursor.execute(
+        f"UPDATE {table_name} SET Units = %s, LastSeen = %s WHERE Hash = %s",
+        (int(new_units), now_utc, event_hash)
+    )
+
+
+def mark_resolved_events(cursor, table_name, visible_hashes):
+    cursor.execute(f"SELECT Hash FROM {table_name} WHERE Resolved = 0")
+    active_hashes = cursor.fetchall()
+
+    for (db_hash,) in active_hashes:
+        if db_hash not in visible_hashes:
+            cursor.execute(
+                f"UPDATE {table_name} SET Resolved = 1 WHERE Hash = %s",
+                (db_hash,)
+            )
 
 
 def main():
@@ -127,6 +167,7 @@ def main():
             continue
 
         events = parse_calls(page_content)
+        visible_hashes = set(event['hash'] for event in events)
 
         try:
             with connect_db() as conn:
@@ -135,11 +176,34 @@ def main():
                         table_name = sanitize_table_name(event['agency'])
                         create_agency_table(cursor, table_name)
 
-                        upsert_event(cursor, table_name, event)
-                        new_calls += 1
-                conn.commit()
+                        last_seen = get_event_last_seen(cursor, table_name, event['hash'])
 
-            logging.info(f"Processed calls (new or updated): {new_calls}")
+                        insert = False
+                        if last_seen is None:
+                            insert = True
+                        else:
+                            delta = datetime.datetime.utcnow() - last_seen
+                            if delta.total_seconds() >= REPEAT_CALL_INTERVAL_SECONDS:
+                                insert = True
+
+                        if insert:
+                            insert_event(cursor, table_name, event)
+                            new_calls += 1
+                        else:
+                            existing_units = get_event_units(cursor, table_name, event['hash'])
+                            if existing_units != int(event['units']):
+                                update_units_and_last_seen(cursor, table_name, event['hash'], event['units'])
+                            else:
+                                update_last_seen(cursor, table_name, event['hash'])
+
+                    # After processing all events, mark any missing ones as resolved
+                    for agency in set(event['agency'] for event in events):
+                        table_name = sanitize_table_name(agency)
+                        mark_resolved_events(cursor, table_name, visible_hashes)
+
+                conn.commit()
+            logging.info(f"New calls added: {new_calls}")
+
         except mysql.connector.Error as err:
             logging.error(f"Database error: {err}")
 
