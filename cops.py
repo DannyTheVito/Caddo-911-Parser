@@ -19,10 +19,10 @@ DB_CONFIG = {
 }
 
 URL = 'http://ias.ecc.caddo911.com/All_ActiveEvents.aspx'
-HEADERS = ["agency", "time", "units", "description", "street", "cross_streets", "municipal"]
-FETCH_INTERVAL_SECONDS = 35
-REPEAT_CALL_INTERVAL_SECONDS = 23 * 3600  # 23 hours
 
+HEADERS = ["agency", "time", "units", "description", "street", "cross_streets", "municipal"]
+FETCH_INTERVAL_SECONDS = 30
+REINSERT_THRESHOLD_HOURS = 23
 
 def fetch_active_calls(url, retries=3, delay=60):
     headers = {
@@ -41,7 +41,6 @@ def fetch_active_calls(url, retries=3, delay=60):
             time.sleep(delay)
     return None
 
-
 def parse_calls(page_content):
     events = []
     soup = BeautifulSoup(page_content, 'html.parser')
@@ -58,22 +57,18 @@ def parse_calls(page_content):
             continue
         event = dict(zip(HEADERS, row_data))
 
-        # Exclude 'units' from the hash
-        combined = ''.join([event[h] for h in HEADERS if h != "units"])
+        combined = ''.join([event[h] for h in HEADERS if h != 'units'])
         event['hash'] = hashlib.md5(combined.encode('utf-8')).hexdigest()
 
         events.append(event)
 
     return events
 
-
 def connect_db():
     return mysql.connector.connect(**DB_CONFIG)
 
-
 def sanitize_table_name(agency_code):
     return "agency_" + re.sub(r'\W+', '', agency_code[:3])
-
 
 def create_agency_table(cursor, table_name):
     cursor.execute(f"""
@@ -91,6 +86,7 @@ def create_agency_table(cursor, table_name):
             FirstSeen DATETIME NOT NULL,
             LastSeen DATETIME NOT NULL,
             Resolved TINYINT(1) DEFAULT 0,
+            UNIQUE KEY unique_event (Hash, FirstSeen),
             KEY idx_agency (Agency) KEY_BLOCK_SIZE=1024,
             KEY idx_municipal (Municipal) KEY_BLOCK_SIZE=1024,
             FULLTEXT KEY idx_description (Description) KEY_BLOCK_SIZE=1024,
@@ -98,18 +94,9 @@ def create_agency_table(cursor, table_name):
         ) ENGINE=MyISAM DEFAULT CHARSET=utf8 COLLATE=utf8_bin KEY_BLOCK_SIZE=1
     """)
 
-
-def get_event_last_seen(cursor, table_name, event_hash):
-    cursor.execute(f"SELECT LastSeen FROM {table_name} WHERE Hash = %s ORDER BY LastSeen DESC LIMIT 1", (event_hash,))
-    row = cursor.fetchone()
-    return row[0] if row else None
-
-
-def get_event_units(cursor, table_name, event_hash):
-    cursor.execute(f"SELECT Units FROM {table_name} WHERE Hash = %s ORDER BY LastSeen DESC LIMIT 1", (event_hash,))
-    row = cursor.fetchone()
-    return row[0] if row else None
-
+def get_latest_event_by_hash(cursor, table_name, event_hash):
+    cursor.execute(f"SELECT id, FirstSeen FROM {table_name} WHERE Hash = %s ORDER BY FirstSeen DESC LIMIT 1", (event_hash,))
+    return cursor.fetchone()
 
 def insert_event(cursor, table_name, event):
     now_utc = datetime.datetime.utcnow()
@@ -125,40 +112,49 @@ def insert_event(cursor, table_name, event):
     )
     cursor.execute(query, params)
 
-
-def update_last_seen(cursor, table_name, event_hash):
-    now_utc = datetime.datetime.utcnow()
-    cursor.execute(
-        f"UPDATE {table_name} SET LastSeen = %s WHERE Hash = %s",
-        (now_utc, event_hash)
-    )
-
-
 def update_units_and_last_seen(cursor, table_name, event_hash, new_units):
-    now_utc = datetime.datetime.utcnow()
     cursor.execute(
-        f"UPDATE {table_name} SET Units = %s, LastSeen = %s WHERE Hash = %s",
-        (int(new_units), now_utc, event_hash)
+        f"""
+        UPDATE {table_name}
+        SET Units = %s, LastSeen = %s
+        WHERE Hash = %s
+        ORDER BY FirstSeen DESC
+        LIMIT 1
+        """,
+        (new_units, datetime.datetime.utcnow(), event_hash)
     )
 
+def mark_resolved_events(cursor, table_name, current_hashes):
+    cursor.execute(f"SELECT Hash, Resolved, FirstSeen FROM {table_name}")
+    all_hashes = cursor.fetchall()
 
-def mark_resolved_events(cursor, table_name, visible_hashes):
-    cursor.execute(f"SELECT Hash FROM {table_name} WHERE Resolved = 0")
-    active_hashes = cursor.fetchall()
+    marked_resolved = 0
+    marked_unresolved = 0
+    now = datetime.datetime.utcnow()
 
-    for (db_hash,) in active_hashes:
-        if db_hash not in visible_hashes:
-            cursor.execute(
-                f"UPDATE {table_name} SET Resolved = 1 WHERE Hash = %s",
-                (db_hash,)
-            )
+    for db_hash, resolved_flag, first_seen in all_hashes:
+        age = now - first_seen
+        if db_hash in current_hashes:
+            if resolved_flag != 0:
+                if age.total_seconds() <= REINSERT_THRESHOLD_HOURS * 3600:
+                    cursor.execute(f"UPDATE {table_name} SET Resolved = 0 WHERE Hash = %s", (db_hash,))
+                    marked_unresolved += 1
+        else:
+            if resolved_flag == 0:
+                cursor.execute(f"UPDATE {table_name} SET Resolved = 1 WHERE Hash = %s", (db_hash,))
+                marked_resolved += 1
 
+    return marked_resolved, marked_unresolved
 
 def main():
     logging.info("Starting Active Calls Monitor")
 
     while True:
         new_calls = 0
+        updated_calls = 0
+        total_resolved = 0
+        total_unresolved = 0
+
         page_content = fetch_active_calls(URL)
 
         if not page_content:
@@ -167,7 +163,7 @@ def main():
             continue
 
         events = parse_calls(page_content)
-        visible_hashes = set(event['hash'] for event in events)
+        visible_hashes_by_agency = {}
 
         try:
             with connect_db() as conn:
@@ -176,39 +172,38 @@ def main():
                         table_name = sanitize_table_name(event['agency'])
                         create_agency_table(cursor, table_name)
 
-                        last_seen = get_event_last_seen(cursor, table_name, event['hash'])
+                        if table_name not in visible_hashes_by_agency:
+                            visible_hashes_by_agency[table_name] = set()
+                        visible_hashes_by_agency[table_name].add(event['hash'])
 
-                        insert = False
-                        if last_seen is None:
-                            insert = True
-                        else:
-                            delta = datetime.datetime.utcnow() - last_seen
-                            if delta.total_seconds() >= REPEAT_CALL_INTERVAL_SECONDS:
-                                insert = True
+                        latest_event = get_latest_event_by_hash(cursor, table_name, event['hash'])
+                        now = datetime.datetime.utcnow()
 
-                        if insert:
+                        if not latest_event:
                             insert_event(cursor, table_name, event)
                             new_calls += 1
                         else:
-                            existing_units = get_event_units(cursor, table_name, event['hash'])
-                            if existing_units != int(event['units']):
-                                update_units_and_last_seen(cursor, table_name, event['hash'], event['units'])
+                            latest_id, first_seen = latest_event
+                            age = now - first_seen
+                            if age.total_seconds() > REINSERT_THRESHOLD_HOURS * 3600:
+                                insert_event(cursor, table_name, event)
+                                new_calls += 1
                             else:
-                                update_last_seen(cursor, table_name, event['hash'])
+                                update_units_and_last_seen(cursor, table_name, event['hash'], event['units'])
+                                updated_calls += 1
 
-                    # After processing all events, mark any missing ones as resolved
-                    for agency in set(event['agency'] for event in events):
-                        table_name = sanitize_table_name(agency)
-                        mark_resolved_events(cursor, table_name, visible_hashes)
+                    for table_name, hashes in visible_hashes_by_agency.items():
+                        marked_resolved, marked_unresolved = mark_resolved_events(cursor, table_name, hashes)
+                        total_resolved += marked_resolved
+                        total_unresolved += marked_unresolved
 
                 conn.commit()
-            logging.info(f"New calls added: {new_calls}")
 
+            logging.info(f"Scrape summary: {new_calls} new, {updated_calls} updated, {total_resolved} resolved, {total_unresolved} reactivated.")
         except mysql.connector.Error as err:
             logging.error(f"Database error: {err}")
 
         time.sleep(FETCH_INTERVAL_SECONDS)
-
 
 if __name__ == "__main__":
     main()
