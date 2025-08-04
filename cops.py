@@ -126,8 +126,7 @@ def update_units_and_last_seen(cursor, table_name, event_hash, new_units):
     )
 
 def mark_resolved_events(cursor, table_name, current_hashes):
-    cutoff = datetime.datetime.utcnow() - datetime.timedelta(days=1)
-    cursor.execute(f"SELECT Hash, Resolved, FirstSeen FROM {table_name} WHERE LastSeen > %s", (cutoff,))
+    cursor.execute(f"SELECT Hash, Resolved, FirstSeen FROM {table_name} WHERE Resolved = 0")
     all_hashes = cursor.fetchall()
 
     marked_resolved = 0
@@ -135,15 +134,9 @@ def mark_resolved_events(cursor, table_name, current_hashes):
     now = datetime.datetime.utcnow()
 
     for db_hash, resolved_flag, first_seen in all_hashes:
-        age = now - first_seen
-        if db_hash in current_hashes:
-            if resolved_flag != 0 and age <= datetime.timedelta(hours=REINSERT_THRESHOLD_HOURS):
-                cursor.execute(f"UPDATE {table_name} SET Resolved = 0 WHERE Hash = %s", (db_hash,))
-                marked_unresolved += 1
-        else:
-            if resolved_flag == 0:
-                cursor.execute(f"UPDATE {table_name} SET Resolved = 1 WHERE Hash = %s", (db_hash,))
-                marked_resolved += 1
+        if db_hash not in current_hashes and resolved_flag == 0:
+            cursor.execute(f"UPDATE {table_name} SET Resolved = 1 WHERE Hash = %s", (db_hash,))
+            marked_resolved += 1
 
     return marked_resolved, marked_unresolved
 
@@ -198,14 +191,22 @@ def main():
                                 update_units_and_last_seen(cursor, table_name, event['hash'], event['units'])
                                 updated_calls += 1
 
-                    for table_name, hashes in visible_hashes_by_agency.items():
-                        marked_resolved, marked_unresolved = mark_resolved_events(cursor, table_name, hashes)
+                    cursor.execute("SHOW TABLES LIKE 'agency_%'")
+                    all_tables = [row[0] for row in cursor.fetchall()]
+
+                    for table_name in all_tables:
+                        current_hashes = visible_hashes_by_agency.get(table_name, set())
+                        marked_resolved, marked_unresolved = mark_resolved_events(cursor, table_name, current_hashes)
                         total_resolved += marked_resolved
                         total_unresolved += marked_unresolved
 
                 conn.commit()
 
-            logging.info(f"Scrape summary: {new_calls} new, {updated_calls} updated, {total_resolved} resolved, {total_unresolved} unmarked resolved")
+            logging.info("========== Scrape Summary ==========")
+            logging.info(f"New Calls:          {new_calls:>4}")
+            logging.info(f"Current Calls:      {updated_calls:>4}")
+            logging.info(f"Resolved Calls:     {total_resolved:>4}")
+            logging.info("====================================")
         except mysql.connector.Error as err:
             logging.error(f"Database error: {err}")
 
