@@ -87,11 +87,12 @@ def create_agency_table(cursor, table_name):
             LastSeen DATETIME NOT NULL,
             Resolved TINYINT(1) DEFAULT 0,
             UNIQUE KEY unique_event (Hash, FirstSeen),
-            KEY idx_agency (Agency) KEY_BLOCK_SIZE=1024,
-            KEY idx_municipal (Municipal) KEY_BLOCK_SIZE=1024,
-            FULLTEXT KEY idx_description (Description) KEY_BLOCK_SIZE=1024,
-            FULLTEXT KEY idx_street_cross (Street, CrossStreets) KEY_BLOCK_SIZE=1024
-        ) ENGINE=MyISAM DEFAULT CHARSET=utf8 COLLATE=utf8_bin KEY_BLOCK_SIZE=1
+            INDEX idx_agency (Agency),
+            INDEX idx_municipal (Municipal),
+            INDEX idx_hash_lastseen (Hash, LastSeen),
+            FULLTEXT INDEX idx_description (Description),
+            FULLTEXT INDEX idx_street_cross (Street, CrossStreets)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_bin
     """)
 
 def get_latest_event_by_hash(cursor, table_name, event_hash):
@@ -125,7 +126,8 @@ def update_units_and_last_seen(cursor, table_name, event_hash, new_units):
     )
 
 def mark_resolved_events(cursor, table_name, current_hashes):
-    cursor.execute(f"SELECT Hash, Resolved, FirstSeen FROM {table_name}")
+    cutoff = datetime.datetime.utcnow() - datetime.timedelta(days=1)
+    cursor.execute(f"SELECT Hash, Resolved, FirstSeen FROM {table_name} WHERE LastSeen > %s", (cutoff,))
     all_hashes = cursor.fetchall()
 
     marked_resolved = 0
@@ -135,10 +137,9 @@ def mark_resolved_events(cursor, table_name, current_hashes):
     for db_hash, resolved_flag, first_seen in all_hashes:
         age = now - first_seen
         if db_hash in current_hashes:
-            if resolved_flag != 0:
-                if age.total_seconds() <= REINSERT_THRESHOLD_HOURS * 3600:
-                    cursor.execute(f"UPDATE {table_name} SET Resolved = 0 WHERE Hash = %s", (db_hash,))
-                    marked_unresolved += 1
+            if resolved_flag != 0 and age <= datetime.timedelta(hours=REINSERT_THRESHOLD_HOURS):
+                cursor.execute(f"UPDATE {table_name} SET Resolved = 0 WHERE Hash = %s", (db_hash,))
+                marked_unresolved += 1
         else:
             if resolved_flag == 0:
                 cursor.execute(f"UPDATE {table_name} SET Resolved = 1 WHERE Hash = %s", (db_hash,))
@@ -168,9 +169,14 @@ def main():
         try:
             with connect_db() as conn:
                 with conn.cursor() as cursor:
+                    created_tables = set()
+
                     for event in events:
                         table_name = sanitize_table_name(event['agency'])
-                        create_agency_table(cursor, table_name)
+
+                        if table_name not in created_tables:
+                            create_agency_table(cursor, table_name)
+                            created_tables.add(table_name)
 
                         if table_name not in visible_hashes_by_agency:
                             visible_hashes_by_agency[table_name] = set()
@@ -199,7 +205,7 @@ def main():
 
                 conn.commit()
 
-            logging.info(f"Scrape summary: {new_calls} new, {updated_calls} updated, {total_resolved} resolved, {total_unresolved} reactivated.")
+            logging.info(f"Scrape summary: {new_calls} new, {updated_calls} updated, {total_resolved} resolved, {total_unresolved} unmarked resolved")
         except mysql.connector.Error as err:
             logging.error(f"Database error: {err}")
 
