@@ -134,10 +134,11 @@ def mark_resolved_events(cursor, table_name, current_hashes):
     now = datetime.datetime.utcnow()
 
     for db_hash, resolved_flag, first_seen in all_hashes:
-        if db_hash not in current_hashes and resolved_flag == 0:
+        age = now - first_seen
+        if (db_hash not in current_hashes or age.total_seconds() > REINSERT_THRESHOLD_HOURS * 3600) and resolved_flag == 0:
             cursor.execute(f"UPDATE {table_name} SET Resolved = 1 WHERE Hash = %s", (db_hash,))
             marked_resolved += 1
-
+          
     return marked_resolved, marked_unresolved
 
 def main():
