@@ -1,3 +1,7 @@
-beautifulsoup4
-mysql-connector-python
-requests
+requests 
+beautifulsoup4 
+mysql-connector-python 
+thefuzz 
+pandas
+sqlalchemy 
+osmnx
