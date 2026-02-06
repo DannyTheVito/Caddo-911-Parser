@@ -1,6 +1,6 @@
-# cops.py
+# Caddo 911 Parser
 
-**cops.py** is a Python script that monitors and stores active emergency calls from the Caddo 911 website. It parses data from a public webpage and logs structured call information into a MySQL database for long-term tracking, auditing, and analysis.
+**Caddo 911 Parser** is a Python script that monitors, stores, and geolocates active emergency calls from the Caddo 911 website. It parses data from a public webpage and logs structured call information into a MySQL database for long-term tracking, auditing, and analysis.
 
 ---
 
@@ -20,6 +20,7 @@
 - Logs changes in unit count
 - Avoids redundant entries unless 23 hours have passed
 - Runs continuously with automatic retry on failure
+- Geolocates calls using locally parsed intersection data from OpenStreetMap
 
 ---
 
@@ -35,6 +36,14 @@ databasepasswd = "your-db-password"
 databasename = "your-db-name"
 ```
 
+# **Important** 
+For geolocating to work, you must run the companion script at least once to populate the `osm_intersections` table in the database. This will download street data from OpenStreetMaps and parse intersections and street names. 
+Do not run this more than once every 3 or so months. It completely wipes the table and repopulates it from a fresh download from OpenStreetMaps. This will be changed in future releases to append new street data. 
+
+```bash
+python FindStreets.py
+```
+
 ---
 
 ## 🗃️ Database Schema
@@ -48,15 +57,17 @@ Table schema includes:
 - `FirstSeen`, `LastSeen`: UTC timestamps
 - `Resolved`: Marks calls that have disappeared from the source site
 - Full-text indexes on `Description`, `Street`, and `CrossStreets`
+- `lat/lon`: latitude and longitude for geolocated calls
 
 ---
 
 ## 🔁 How It Works
 
-1. Every **35 seconds**, the script fetches the active calls page.
+1. Every **30 seconds**, the script fetches the active calls page.
 2. Parses the HTML table of calls.
 3. For each call:
    - A hash (excluding `Units`) is computed.
+   - A geolocation is attempted to be found.
    - The corresponding agency table is created if missing.
    - The call is:
      - Inserted if it's new
@@ -72,7 +83,7 @@ Table schema includes:
 Ensure your environment has the required libraries:
 
 ```bash
-pip install requests beautifulsoup4 mysql-connector-python
+pip install requests beautifulsoup4 mysql-connector-python thefuzz sqlalchemy osmnx pandas
 ```
 
 Then simply run:
