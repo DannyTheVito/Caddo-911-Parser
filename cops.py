@@ -122,7 +122,8 @@ def create_agency_table(cursor, table_name):
             Resolved TINYINT(1) DEFAULT 0,
             lat DECIMAL(10, 8) NULL,
             lon DECIMAL(11, 8) NULL,
-            UNIQUE KEY unique_event (Hash, FirstSeen)
+            UNIQUE KEY unique_event (Hash, FirstSeen),
+            INDEX (Hash)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_bin
     """)
 
