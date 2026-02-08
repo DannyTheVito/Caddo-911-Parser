@@ -153,7 +153,7 @@ def mark_resolved_events(cursor, table_name, current_hashes):
         
         age = now - first_seen
         if (row['Hash'] not in current_hashes or age.total_seconds() > REINSERT_THRESHOLD_HOURS * 3600):
-            cursor.execute(f"UPDATE {table_name} SET Resolved = 1 WHERE Hash = %s", (row['Hash'],))
+            cursor.execute(f"UPDATE {table_name} SET Resolved = 1 WHERE Hash = %s AND Resolved = 0", (row['Hash'],))
             marked_resolved += 1
     return marked_resolved
 
@@ -193,13 +193,13 @@ def main():
                             visible_hashes_by_agency[t_name] = set()
                         visible_hashes_by_agency[t_name].add(event['hash'])
 
-                        cursor.execute(f"SELECT id FROM {t_name} WHERE Hash = %s ORDER BY FirstSeen DESC LIMIT 1", (event['hash'],))
+                        cursor.execute(f"SELECT id FROM {t_name} WHERE Hash = %s AND Resolved = 0 ORDER BY FirstSeen DESC LIMIT 1", (event['hash'],))
                         if not cursor.fetchone():
                             was_geocoded = insert_event(cursor, t_name, event)
                             stats['new'] += 1
                             if was_geocoded: stats['geocoded'] += 1
                         else:
-                            cursor.execute(f"UPDATE {t_name} SET Units = %s, LastSeen = %s WHERE Hash = %s ORDER BY FirstSeen DESC LIMIT 1",
+                            cursor.execute(f"UPDATE {t_name} SET Units = %s, LastSeen = %s WHERE Hash = %s AND Resolved = 0",
                                            (event['units'], datetime.datetime.now(UTC).replace(tzinfo=None), event['hash']))
                             stats['updated'] += 1
 
